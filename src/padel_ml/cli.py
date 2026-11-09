@@ -1,9 +1,9 @@
 """Command line interface: `padel-ml <command>`.
 
 Typical workflow
-  padel-ml scrape-rankings                       # players + FIP ranking
-  padel-ml scrape-results URL --tournament X --date YYYY-MM-DD
-  padel-ml import-matches history.csv           # bulk history (most reliable)
+  padel-ml sync-matches --since 2023-01-01      # history from Padel API (needs token)
+  padel-ml sync-rankings                        # weekly ranking snapshot from Padel API
+  padel-ml import-matches history.csv           # any extra history you have as CSV
   padel-ml train
   padel-ml odds-template odds.csv               # fill with bet365.es prices
   padel-ml import-odds odds.csv
@@ -76,6 +76,23 @@ def cmd_scrape_results(args) -> None:
         total += scrape_results(db, url, args.tournament, args.date, args.category,
                                 args.gender, f)
     print(f"stored {total} matches")
+
+
+def cmd_sync_matches(args) -> None:
+    from .scrapers.padelapi import PadelApiClient, sync_matches
+    levels = tuple(args.levels.split(","))
+    counts = sync_matches(_db(args), PadelApiClient(requests_per_minute=args.rpm),
+                          args.since, args.until, levels)
+    print("Padel API sync:", counts)
+    if counts.get("hidden_free_plan"):
+        print("note: matches older than 6 months have hidden scores on the free plan; "
+              "the Plus plan unlocks the full archive")
+
+
+def cmd_sync_rankings(args) -> None:
+    from .scrapers.padelapi import PadelApiClient, sync_rankings
+    n = sync_rankings(_db(args), PadelApiClient(requests_per_minute=args.rpm), args.date)
+    print(f"stored {n} ranking rows from Padel API")
 
 
 def cmd_import_matches(args) -> None:
@@ -193,7 +210,19 @@ def build_parser() -> argparse.ArgumentParser:
     add("init", cmd_init, "create the database")
     add("stats", cmd_stats, "row counts")
 
-    sp = add("scrape-rankings", cmd_scrape_rankings, "scrape FIP rankings (players + points)")
+    from .scrapers.padelapi import PREMIER_LEVELS
+    sp = add("sync-matches", cmd_sync_matches, "download match history from Padel API")
+    sp.add_argument("--since", default="2023-01-01", help="first tournament date")
+    sp.add_argument("--until", help="last tournament date (default: no limit)")
+    sp.add_argument("--levels", default=",".join(PREMIER_LEVELS),
+                    help="comma-separated levels, e.g. major,p1,p2,finals,fip_platinum")
+    sp.add_argument("--rpm", type=int, help="requests per minute (free plan: 10)")
+    sp = add("sync-rankings", cmd_sync_rankings, "download ranking snapshot from Padel API")
+    sp.add_argument("--date", help="ranking in force on this date (default: latest)")
+    sp.add_argument("--rpm", type=int)
+
+    sp = add("scrape-rankings", cmd_scrape_rankings,
+             "scrape padelfip.com rankings (site currently blocks bots)")
     sp.add_argument("--gender", nargs="+", default=["M", "F"], choices=["M", "F"])
     sp.add_argument("--no-cache", action="store_true")
 
@@ -240,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
                         format="%(levelname)s %(name)s: %(message)s")
     try:
         args.fn(args)
-    except (RuntimeError, FileNotFoundError, ValueError) as e:
+    except (RuntimeError, FileNotFoundError, ValueError) as e:  # PadelApiError is a RuntimeError
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 0

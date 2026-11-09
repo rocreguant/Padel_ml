@@ -6,7 +6,7 @@ pair's chances higher than the odds imply.
 
 ```
  ┌───────────── 1. data ─────────────┐   ┌──── 2. model ────┐   ┌──── 3. betting ────┐
- FIP rankings ─┐                        │  chronological    │   │ bet365 odds (CSV)  │
+ Padel API    ┐                        │  chronological    │   │ bet365 odds (CSV)  │
  results pages ├─► SQLite (players,     ├─► feature replay  ├──►│ remove margin      ├─► bets
  CSV history  ─┘   rankings, matches,   │  Elo + LogReg/GBM │   │ EV, fractional     │
                    odds, predictions)   │  time-split eval  │   │ Kelly stake        │
@@ -18,7 +18,7 @@ pair's chances higher than the odds imply.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest              # 12 tests
+pytest              # 17 tests, no network needed
 ```
 
 ## Try it in 30 seconds (synthetic data)
@@ -38,24 +38,43 @@ The demo data is **made up**. It only shows that the plumbing works.
 
 ### 1. Build the database
 
-| Command | Source | What it stores |
+**Main source: [Padel API](https://padelapi.org).** It's a public REST API with Premier
+Padel and FIP results (every round from 2023 onward), World Padel Tour and Padel Pro
+Tour finals back to 2006, and weekly rankings. Its terms allow storing the data for
+your own use.
+
+| Plan | Price | What you get |
 |---|---|---|
-| `padel-ml scrape-rankings` | padelfip.com ranking pages | players (name, gender, country) and a dated ranking snapshot |
-| `padel-ml scrape-results URL --tournament "Madrid P1" --date 2026-05-10 --category P1 --gender M` | a tournament results/draw page (Premier Padel, FIP) | completed matches with scores; unplayed draw matches are stored as upcoming fixtures |
-| `padel-ml import-matches history.csv` | any CSV you assemble | historical matches and fixtures (most reliable option) |
-| `padel-ml import-players players.csv` | CSV | extra player attributes (hand, side, height, birth date, ranking) |
+| Free | €0 | 50k requests/month (10/min), current rankings, **scores from the last 6 months only** |
+| Plus | €19/month | full historical archive, 60 requests/min |
 
-The CSV formats are in `examples/` and documented in
-`src/padel_ml/scrapers/csv_import.py`. Names are matched accent- and case-insensitively
-("Agustín TAPIA" and "agustin tapia" are the same player).
+```bash
+export PADEL_API_TOKEN=...            # from https://padelapi.org/register
+padel-ml sync-matches --since 2023-01-01           # Premier Padel: major,p1,p2,finals
+padel-ml sync-matches --since 2023-01-01 --levels fip_platinum,fip_gold
+padel-ml sync-rankings                             # run weekly to build ranking history
+padel-ml sync-matches --since 2026-11-01           # re-run to pick up new results/fixtures
+```
 
-Scraping is polite: it respects `robots.txt`, waits 2 s between requests to the same
-host and caches pages for 12 h in `data/cache/`. Websites change their HTML, so the
-parsers are tolerant and keep all their CSS selectors at the top of
-`scrapers/fip.py` and `scrapers/results.py`. If a scrape returns 0 rows, update the
-selectors there. Pages that build their content with JavaScript need the CSV route.
+Syncing can be repeated safely because every match is keyed by its Padel API id.
+Fixtures that haven't been played yet are stored as upcoming matches, ready for
+predictions and odds. On the free plan, older matches come back with hidden scores and
+are skipped, and the sync tells you how many. At 10 requests/min, a full Premier Padel
+season (about 25 tournaments × 3–4 pages) takes roughly 10 minutes.
 
-**Run `scrape-rankings` regularly (e.g. weekly).** Ranking features are strictly
+Other sources:
+
+| Command | Source | Status |
+|---|---|---|
+| `padel-ml import-matches history.csv` | any CSV you assemble | works; format in `examples/` |
+| `padel-ml import-players players.csv` | CSV | extra player attributes (hand, height, birth date) |
+| `padel-ml scrape-results URL ...` | a tournament page with results in its HTML | generic parser; premierpadel.com loads results with JavaScript, so it finds nothing there |
+| `padel-ml scrape-rankings` | padelfip.com | **blocked**: the site shows bots a Cloudflare challenge (HTTP 403) |
+
+Names are matched accent- and case-insensitively ("Agustín TAPIA" and "agustin tapia"
+are the same player).
+
+**Run `sync-rankings` regularly (e.g. weekly).** Ranking features are strictly
 "as of" the match date. A ranking scraped today is never used for a match played
 last year, because that would leak the future into training. The ranking features
 become useful once a history of snapshots has built up.
@@ -128,6 +147,8 @@ These environment variables are optional:
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `PADEL_API_TOKEN` | – | Padel API token (required for `sync-*`) |
+| `PADEL_API_RPM` | `10` | Padel API requests per minute (60 on paid plans) |
 | `PADEL_ML_DB` | `data/padel.db` | database path |
 | `PADEL_ML_DATA_DIR` | `data` | cache, models, reports |
 | `PADEL_ML_DELAY` | `2.0` | seconds between requests to the same host |
@@ -139,7 +160,7 @@ These environment variables are optional:
 ```
 src/padel_ml/
   db.py            SQLite schema and access
-  scrapers/        FIP rankings, results pages, CSV import, polite fetcher
+  scrapers/        Padel API client, CSV import, HTML scrapers, polite fetcher
   features.py      chronological Elo/form/h2h/ranking features
   model.py         training, validation, prediction
   odds/            odds sources (manual bet365 CSV; pluggable provider)
